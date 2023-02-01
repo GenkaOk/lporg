@@ -119,7 +119,7 @@ func parsePages(root int, parentMapping map[int][]database.Item) (database.Apps,
 }
 
 // CmdDefaultOrg will organize your launchpad by the app default categories
-func CmdDefaultOrg(verbose bool) error {
+func CmdDefaultOrg(verbose bool, dryRun bool) error {
 
 	log.Infof(bold, "USING DEFAULT LAUNCHPAD ORGANIZATION")
 
@@ -138,9 +138,11 @@ func CmdDefaultOrg(verbose bool) error {
 	utils.Indent(log.WithFields(log.Fields{"database": lpad.File}).Info)("found launchpad database")
 
 	// start from a clean slate
-	err := removeOldDatabaseFiles(lpad.Folder)
-	if err != nil {
-		return err
+	if !dryRun {
+		err := removeOldDatabaseFiles(lpad.Folder)
+		if err != nil {
+			return err
+		}
 	}
 
 	// open launchpad database
@@ -156,19 +158,21 @@ func CmdDefaultOrg(verbose bool) error {
 		db.LogMode(true)
 	}
 
-	// Clear all items related to groups so we can re-create them
-	if err := lpad.ClearGroups(); err != nil {
-		log.WithError(err).Fatal("ClearGroups failed")
-	}
+	if !dryRun {
+		// Clear all items related to groups so we can re-create them
+		if err := lpad.ClearGroups(); err != nil {
+			log.WithError(err).Fatal("ClearGroups failed")
+		}
 
-	// Disable the update triggers
-	if err := lpad.DisableTriggers(); err != nil {
-		log.WithError(err).Fatal("DisableTriggers failed")
-	}
+		// Disable the update triggers
+		if err := lpad.DisableTriggers(); err != nil {
+			log.WithError(err).Fatal("DisableTriggers failed")
+		}
 
-	// Add root and holding pages to items and groups
-	if err := lpad.AddRootsAndHoldingPages(); err != nil {
-		log.WithError(err).Fatal("AddRootsAndHoldingPagesfailed")
+		// Add root and holding pages to items and groups
+		if err := lpad.AddRootsAndHoldingPages(); err != nil {
+			log.WithError(err).Fatal("AddRootsAndHoldingPagesfailed")
+		}
 	}
 
 	// We will begin our group records using the max ids found (groups always appear after apps and widgets)
@@ -188,23 +192,25 @@ func CmdDefaultOrg(verbose bool) error {
 		log.WithError(err).Error("categories query failed")
 	}
 
-	for _, category := range categories {
-		folderName := strings.Title(strings.Replace(strings.TrimPrefix(category.UTI, "public.app-category."), "-", " ", 1))
-		folder := database.AppFolder{Name: folderName}
-		folderPage := database.FolderPage{Number: 1}
-		utils.DoubleIndent(log.WithField("folder", folderName).Info)("adding folder")
-		if err := db.Where("category_id = ?", category.ID).Find(&apps).Error; err != nil {
-			log.WithError(err).Error("categories query failed")
+	if !dryRun {
+		for _, category := range categories {
+			folderName := strings.Title(strings.Replace(strings.TrimPrefix(category.UTI, "public.app-category."), "-", " ", 1))
+			folder := database.AppFolder{Name: folderName}
+			folderPage := database.FolderPage{Number: 1}
+			utils.DoubleIndent(log.WithField("folder", folderName).Info)("adding folder")
+			if err := db.Where("category_id = ?", category.ID).Find(&apps).Error; err != nil {
+				log.WithError(err).Error("categories query failed")
+			}
+			for _, app := range apps {
+				utils.TripleIndent(log.WithField("app", app.Title).Info)("adding app to category folder")
+				folderPage.Items = utils.AppendIfMissing(folderPage.Items, app.Title)
+			}
+			folder.Pages = append(folder.Pages, folderPage)
+			page.Items = append(page.Items, folder)
 		}
-		for _, app := range apps {
-			utils.TripleIndent(log.WithField("app", app.Title).Info)("adding app to category folder")
-			folderPage.Items = utils.AppendIfMissing(folderPage.Items, app.Title)
-		}
-		folder.Pages = append(folder.Pages, folderPage)
-		page.Items = append(page.Items, folder)
-	}
 
-	conf.Apps.Pages = append(conf.Apps.Pages, page)
+		conf.Apps.Pages = append(conf.Apps.Pages, page)
+	}
 
 	////////////////////////////////////////////////////////////////////
 	// Place Widgets ///////////////////////////////////////////////////
@@ -222,28 +228,30 @@ func CmdDefaultOrg(verbose bool) error {
 
 	/////////////////////////////////////////////////////////////////////
 	// Place Apps ///////////////////////////////////////////////////////
-	utils.Indent(log.Info)("creating App folders and adding apps to them")
-	missing, err := lpad.GetMissing(conf.Apps, database.ApplicationType)
-	if err != nil {
-		log.WithError(err).Fatal("Default GetMissing=>Apps")
+	if !dryRun {
+		utils.Indent(log.Info)("creating App folders and adding apps to them")
+		missing, err := lpad.GetMissing(conf.Apps, database.ApplicationType)
+		if err != nil {
+			log.WithError(err).Fatal("Default GetMissing=>Apps")
+		}
+
+		conf.Apps.Pages = parseMissing(missing, conf.Apps.Pages)
+		groupID, err = lpad.ApplyConfig(conf.Apps, database.ApplicationType, groupID, 1)
+		if err != nil {
+			log.WithError(err).Fatal("Default ApplyConfig==>Apps")
+		}
+
+		// Re-enable the update triggers
+		if err := lpad.EnableTriggers(); err != nil {
+			log.WithError(err).Fatal("EnableTriggers failed")
+		}
 	}
 
-	conf.Apps.Pages = parseMissing(missing, conf.Apps.Pages)
-	groupID, err = lpad.ApplyConfig(conf.Apps, database.ApplicationType, groupID, 1)
-	if err != nil {
-		log.WithError(err).Fatal("Default ApplyConfig==>Apps")
-	}
-
-	// Re-enable the update triggers
-	if err := lpad.EnableTriggers(); err != nil {
-		log.WithError(err).Fatal("EnableTriggers failed")
-	}
-
-	return restartDock()
+	return restartDock(dryRun)
 }
 
 // CmdSaveConfig will save your launchpad settings to a config file
-func CmdSaveConfig(verbose bool, configFile string) error {
+func CmdSaveConfig(verbose bool, dryRun bool, configFile string) error {
 
 	log.Infof(bold, "SAVING LAUNCHPAD DATABASE")
 
@@ -337,12 +345,14 @@ func CmdSaveConfig(verbose bool, configFile string) error {
 
 	// write out config YAML file
 	d, err := yaml.Marshal(&conf)
-	if err != nil {
-		return errors.Wrap(err, "unable to marshall YAML")
-	}
+	if !dryRun {
+		if err != nil {
+			return errors.Wrap(err, "unable to marshall YAML")
+		}
 
-	if err = ioutil.WriteFile(configFile, d, 0644); err != nil {
-		return errors.Wrap(err, "unable to write YAML")
+		if err = ioutil.WriteFile(configFile, d, 0644); err != nil {
+			return errors.Wrap(err, "unable to write YAML")
+		}
 	}
 
 	log.Infof(bold, "successfully wrote: "+configFile)
@@ -351,7 +361,7 @@ func CmdSaveConfig(verbose bool, configFile string) error {
 }
 
 // CmdLoadConfig will load your launchpad settings from a config file
-func CmdLoadConfig(verbose bool, configFile string) error {
+func CmdLoadConfig(verbose bool, dryRun bool, configFile string) error {
 	// Read in Config file
 	config, err := database.LoadConfig(configFile)
 	if err != nil {
@@ -381,9 +391,11 @@ func CmdLoadConfig(verbose bool, configFile string) error {
 	utils.Indent(log.WithFields(log.Fields{"database": lpad.File}).Info)("found launchpad database")
 
 	// start from a clean slate
-	err = removeOldDatabaseFiles(lpad.Folder)
-	if err != nil {
-		return err
+	if !dryRun {
+		err = removeOldDatabaseFiles(lpad.Folder)
+		if err != nil {
+			return err
+		}
 	}
 
 	// open launchpad database
@@ -399,19 +411,21 @@ func CmdLoadConfig(verbose bool, configFile string) error {
 		db.LogMode(true)
 	}
 
-	// Clear all items related to groups so we can re-create them
-	if err := lpad.ClearGroups(); err != nil {
-		log.WithError(err).Fatal("ClearGroups failed")
-	}
+	if !dryRun {
+		// Clear all items related to groups so we can re-create them
+		if err := lpad.ClearGroups(); err != nil {
+			log.WithError(err).Fatal("ClearGroups failed")
+		}
 
-	// Disable the update triggers
-	if err := lpad.DisableTriggers(); err != nil {
-		log.WithError(err).Fatal("DisableTriggers failed")
-	}
+		// Disable the update triggers
+		if err := lpad.DisableTriggers(); err != nil {
+			log.WithError(err).Fatal("DisableTriggers failed")
+		}
 
-	// Add root and holding pages to items and groups
-	if err := lpad.AddRootsAndHoldingPages(); err != nil {
-		log.WithError(err).Fatal("AddRootsAndHoldingPagesfailed")
+		// Add root and holding pages to items and groups
+		if err := lpad.AddRootsAndHoldingPages(); err != nil {
+			log.WithError(err).Fatal("AddRootsAndHoldingPagesfailed")
+		}
 	}
 
 	// We will begin our group records using the max ids found (groups always appear after apps and widgets)
@@ -434,28 +448,30 @@ func CmdLoadConfig(verbose bool, configFile string) error {
 	/////////////////////////////////////////////////////////////////////
 	// Place Apps ///////////////////////////////////////////////////////
 	utils.Indent(log.Info)("creating App folders and adding apps to them")
-	missing, err := lpad.GetMissing(config.Apps, database.ApplicationType)
-	if err != nil {
-		log.WithError(err).Fatal("GetMissing=>Apps")
+	if !dryRun {
+		missing, err := lpad.GetMissing(config.Apps, database.ApplicationType)
+		if err != nil {
+			log.WithError(err).Fatal("GetMissing=>Apps")
+		}
+
+		config.Apps.Pages = parseMissing(missing, config.Apps.Pages)
+		groupID, err = lpad.ApplyConfig(config.Apps, database.ApplicationType, groupID, 1)
+		if err != nil {
+			log.WithError(err).Fatal("ApplyConfig=>Apps")
+		}
+
+		// Re-enable the update triggers
+		if err := lpad.EnableTriggers(); err != nil {
+			log.WithError(err).Fatal("EnableTriggers failed")
+		}
+
+		if len(config.Desktop.Image) > 0 {
+			utils.Indent(log.WithField("image", config.Desktop.Image).Info)("setting desktop background image")
+			background.SetDesktopImage(config.Desktop.Image)
+		}
 	}
 
-	config.Apps.Pages = parseMissing(missing, config.Apps.Pages)
-	groupID, err = lpad.ApplyConfig(config.Apps, database.ApplicationType, groupID, 1)
-	if err != nil {
-		log.WithError(err).Fatal("ApplyConfig=>Apps")
-	}
-
-	// Re-enable the update triggers
-	if err := lpad.EnableTriggers(); err != nil {
-		log.WithError(err).Fatal("EnableTriggers failed")
-	}
-
-	if len(config.Desktop.Image) > 0 {
-		utils.Indent(log.WithField("image", config.Desktop.Image).Info)("setting desktop background image")
-		background.SetDesktopImage(config.Desktop.Image)
-	}
-
-	return restartDock()
+	return restartDock(dryRun)
 }
 
 func init() {
@@ -478,6 +494,10 @@ func main() {
 		cli.BoolFlag{
 			Name:  "verbose, V",
 			Usage: "verbose output",
+		},
+		cli.BoolFlag{
+			Name:  "dry-run, d",
+			Usage: "simulate the command without actually doing anything",
 		},
 	}
 	app.Commands = []cli.Command{
@@ -510,7 +530,7 @@ func main() {
 				}
 
 				if backup {
-					err := CmdSaveConfig(c.GlobalBool("verbose"), savePath("", c.GlobalBool("icloud")))
+					err := CmdSaveConfig(c.GlobalBool("verbose"), c.GlobalBool("dry-run"), savePath("", c.GlobalBool("icloud")))
 					if err != nil {
 						return err
 					}
@@ -518,7 +538,7 @@ func main() {
 					fmt.Println()
 				}
 
-				return CmdDefaultOrg(c.GlobalBool("verbose"))
+				return CmdDefaultOrg(c.GlobalBool("verbose"), c.GlobalBool("dry-run"))
 			},
 		},
 		{
@@ -532,7 +552,7 @@ func main() {
 			},
 			Action: func(c *cli.Context) error {
 				if len(c.String("config")) > 0 {
-					return CmdSaveConfig(c.GlobalBool("verbose"), savePath(c.String("config"), false))
+					return CmdSaveConfig(c.GlobalBool("verbose"), c.GlobalBool("dry-run"), savePath(c.String("config"), false))
 				}
 				location := ""
 				prompt := &survey.Select{
@@ -541,9 +561,9 @@ func main() {
 				}
 				survey.AskOne(prompt, &location, nil)
 				if strings.EqualFold(location, "iCloud") {
-					return CmdSaveConfig(c.GlobalBool("verbose"), savePath(c.String("config"), true))
+					return CmdSaveConfig(c.GlobalBool("verbose"), c.GlobalBool("dry-run"), savePath(c.String("config"), true))
 				} else if strings.EqualFold(location, "home folder") {
-					return CmdSaveConfig(c.GlobalBool("verbose"), savePath(c.String("config"), c.Bool("icloud")))
+					return CmdSaveConfig(c.GlobalBool("verbose"), c.GlobalBool("dry-run"), savePath(c.String("config"), c.Bool("icloud")))
 				}
 
 				os.Exit(1)
@@ -600,7 +620,7 @@ func main() {
 				}
 
 				if backup {
-					err := CmdSaveConfig(c.GlobalBool("verbose"), savePath("", c.GlobalBool("icloud")))
+					err := CmdSaveConfig(c.GlobalBool("verbose"), c.GlobalBool("dry-run"), savePath("", c.GlobalBool("icloud")))
 					if err != nil {
 						return err
 					}
@@ -609,7 +629,7 @@ func main() {
 				}
 
 				// user supplied launchpad config YAMLdep
-				err := CmdLoadConfig(c.GlobalBool("verbose"), configFileName)
+				err := CmdLoadConfig(c.GlobalBool("verbose"), c.GlobalBool("dry-run"), configFileName)
 				if err != nil {
 					return err
 				}
@@ -620,7 +640,7 @@ func main() {
 			Name:  "revert",
 			Usage: "revert to launchpad settings backup",
 			Action: func(c *cli.Context) error {
-				return CmdLoadConfig(c.GlobalBool("verbose"), savePath("", c.GlobalBool("icloud")))
+				return CmdLoadConfig(c.GlobalBool("verbose"), c.GlobalBool("dry-run"), savePath("", c.GlobalBool("icloud")))
 			},
 		},
 	}

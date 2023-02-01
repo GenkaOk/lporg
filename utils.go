@@ -114,16 +114,18 @@ func RunCommand(ctx context.Context, cmd string, args ...string) (string, error)
 	return string(output), nil
 }
 
-func restartDock() error {
+func restartDock(dryRun bool) error {
 	ctx := context.Background()
 
 	utils.Indent(log.Info)("restarting Dock")
-	if _, err := RunCommand(ctx, "killall", "Dock"); err != nil {
-		return errors.Wrap(err, "killing Dock process failed")
-	}
+	if !dryRun {
+		if _, err := RunCommand(ctx, "killall", "Dock"); err != nil {
+			return errors.Wrap(err, "killing Dock process failed")
+		}
 
-	// let system settle
-	time.Sleep(5 * time.Second)
+		// let system settle
+		time.Sleep(5 * time.Second)
+	}
 
 	return nil
 }
@@ -148,7 +150,7 @@ func removeOldDatabaseFiles(dbpath string) error {
 
 	}
 
-	return restartDock()
+	return restartDock(false)
 }
 
 func savePath(confPath string, icloud bool) string {
