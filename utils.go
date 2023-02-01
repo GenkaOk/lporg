@@ -3,10 +3,14 @@ package main
 import (
 	"context"
 	"fmt"
+	"github.com/blacktop/lporg/database"
+	"github.com/blacktop/lporg/dock"
+	"github.com/jinzhu/gorm"
 	"os"
 	"os/exec"
 	"os/user"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -195,6 +199,94 @@ func getiCloudDrivePath() (string, error) {
 	}
 
 	return filepath.Join(user.HomeDir, "Library/Mobile Documents/com~apple~CloudDocs"), nil
+}
+
+func getLaunchpadConfig(verbose bool) (database.Config, error) {
+	var (
+		launchpadRoot int
+		dashboardRoot int
+		items         []database.Item
+		dbinfo        []database.DBInfo
+		conf          database.Config
+	)
+
+	// find launchpad database
+	tmpDir := os.Getenv("TMPDIR")
+	lpad.Folder = filepath.Join(tmpDir, "../0/com.apple.dock.launchpad/db")
+	lpad.File = filepath.Join(lpad.Folder, "db")
+	// lpad.File = "./launchpad.db"
+	if _, err := os.Stat(lpad.File); os.IsNotExist(err) {
+		utils.Indent(log.WithError(err).WithField("path", lpad.File).Fatal)("launchpad DB not found")
+	}
+	utils.Indent(log.WithFields(log.Fields{"database": lpad.File}).Info)("found launchpad database")
+
+	// open launchpad database
+	db, err := gorm.Open("sqlite3", lpad.File)
+	if err != nil {
+		return conf, err
+	}
+	defer db.Close()
+
+	if verbose {
+		db.LogMode(true)
+	}
+
+	// get launchpad and dashboard roots
+	if err := db.Where("key in (?)", []string{"launchpad_root", "dashboard_root"}).Find(&dbinfo).Error; err != nil {
+		log.WithError(err).Error("dbinfo query failed")
+	}
+	for _, info := range dbinfo {
+		switch info.Key {
+		case "launchpad_root":
+			launchpadRoot, _ = strconv.Atoi(info.Value)
+		case "dashboard_root":
+			dashboardRoot, _ = strconv.Atoi(info.Value)
+		default:
+			log.WithField("key", info.Key).Error("bad key")
+		}
+	}
+
+	// get all the relavent items
+	if err := db.Not("uuid in (?)", []string{"ROOTPAGE", "HOLDINGPAGE", "ROOTPAGE_DB", "HOLDINGPAGE_DB", "ROOTPAGE_VERS", "HOLDINGPAGE_VERS"}).
+		Order("items.parent_id, items.ordering").
+		Find(&items).Error; err != nil {
+		log.WithError(err).Error("items query failed")
+	}
+
+	// create parent mapping object
+	log.Info("collecting launchpad/dashboard pages")
+	parentMapping := make(map[int][]database.Item)
+	for _, item := range items {
+		db.Model(&item).Related(&item.App)
+		// db.Model(&item).Related(&item.Widget)
+		db.Model(&item).Related(&item.Group)
+
+		parentMapping[item.ParentID] = append(parentMapping[item.ParentID], item)
+	}
+
+	log.Info("interating over launchpad pages")
+	conf.Apps, err = parsePages(launchpadRoot, parentMapping)
+	if err != nil {
+		return conf, errors.Wrap(err, "unable to parse launchpad pages")
+	}
+
+	log.Info("interating over dashboard pages")
+	conf.Widgets, err = parsePages(dashboardRoot, parentMapping)
+	if err != nil {
+		return conf, errors.Wrap(err, "unable to parse dashboard pages")
+	}
+
+	log.Info("interating over dock apps")
+	dPlist, err := dock.LoadDockPlist()
+	for _, item := range dPlist.PersistentApps {
+		conf.DockItems = append(conf.DockItems, item.TileData.FileLabel)
+	}
+	conf.DockItems = append(conf.DockItems, "============")
+	for _, item := range dPlist.PersistentOthers {
+		conf.DockItems = append(conf.DockItems, item.TileData.FileLabel)
+	}
+
+	return conf, nil
 }
 
 func split(buf []string, lim int) [][]string {
